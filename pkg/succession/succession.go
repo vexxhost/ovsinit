@@ -3,12 +3,14 @@
 package succession
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"sync"
-	"syscall"
 	"time"
+
+	"github.com/gofrs/flock"
 )
 
 // HistoryEntry represents one entry in the succession history
@@ -192,18 +194,28 @@ func (m *Marker) findPosition(data *HistoryData, identity string) int {
 
 // readWithLock reads the history file with a shared lock
 func (m *Marker) readWithLock() (*HistoryData, error) {
-	// Open file for reading
+	// Create flock instance
+	fileLock := flock.New(m.path)
+
+	// Try to acquire shared lock with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), m.lockTimeout)
+	defer cancel()
+
+	locked, err := fileLock.TryRLockContext(ctx, 10*time.Millisecond)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire read lock: %w", err)
+	}
+	if !locked {
+		return nil, fmt.Errorf("timeout acquiring read lock")
+	}
+	defer fileLock.Unlock()
+
+	// Open and read file
 	file, err := os.Open(m.path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-
-	// Acquire shared lock for reading
-	if err := m.lockFile(file, false); err != nil {
-		return nil, fmt.Errorf("failed to acquire read lock: %w", err)
-	}
-	defer m.unlockFile(file)
 
 	// Read and parse
 	var data HistoryData
@@ -217,18 +229,28 @@ func (m *Marker) readWithLock() (*HistoryData, error) {
 
 // updateHistory updates the history file with an exclusive lock
 func (m *Marker) updateHistory(updateFunc func(*HistoryData) error) error {
+	// Create flock instance
+	fileLock := flock.New(m.path)
+
+	// Try to acquire exclusive lock with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), m.lockTimeout)
+	defer cancel()
+
+	locked, err := fileLock.TryLockContext(ctx, 10*time.Millisecond)
+	if err != nil {
+		return fmt.Errorf("failed to acquire write lock: %w", err)
+	}
+	if !locked {
+		return fmt.Errorf("timeout acquiring write lock")
+	}
+	defer fileLock.Unlock()
+
 	// Open or create file
 	file, err := os.OpenFile(m.path, os.O_RDWR|os.O_CREATE, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to open history file: %w", err)
 	}
 	defer file.Close()
-
-	// Acquire exclusive lock for writing
-	if err := m.lockFile(file, true); err != nil {
-		return fmt.Errorf("failed to acquire write lock: %w", err)
-	}
-	defer m.unlockFile(file)
 
 	// Read existing data
 	var data HistoryData
@@ -278,38 +300,6 @@ func (m *Marker) updateHistory(updateFunc func(*HistoryData) error) error {
 	return nil
 }
 
-// lockFile acquires a file lock (exclusive or shared)
-func (m *Marker) lockFile(file *os.File, exclusive bool) error {
-	// Use flock for file locking
-	how := syscall.LOCK_SH
-	if exclusive {
-		how = syscall.LOCK_EX
-	}
-
-	// Try to acquire lock with timeout
-	deadline := time.Now().Add(m.lockTimeout)
-	for {
-		err := syscall.Flock(int(file.Fd()), how|syscall.LOCK_NB)
-		if err == nil {
-			return nil
-		}
-
-		if err != syscall.EWOULDBLOCK {
-			return err
-		}
-
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout acquiring lock")
-		}
-
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// unlockFile releases a file lock
-func (m *Marker) unlockFile(file *os.File) error {
-	return syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-}
 
 // String implements fmt.Stringer
 func (m *Marker) String() string {
