@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/vexxhost/ovsinit/pkg/appctl"
+	"github.com/vexxhost/ovsinit/pkg/succession" // Uses the history.go version
 )
 
 func main() {
@@ -30,18 +32,60 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil)).With("binary", binary)
 	slog.SetDefault(logger)
 
-	var restartStart time.Time
+	podName := os.Getenv("POD_NAME")
+	if podName == "" {
+		slog.Error("POD_NAME environment variable must be set for succession tracking")
+		os.Exit(1)
+	}
 
-	// TODO: handle "flip-flop" case when kubelet restarts old process while new one is starting
+	marker := succession.New(
+		filepath.Join("/run/openvswitch", fmt.Sprintf(".%s.succession", binary)),
+		podName,
+		succession.WithMaxHistory(25),
+	)
+
+	shouldProceed, wasReplaced, err := marker.CheckSuccession()
+	if err != nil {
+		slog.Warn("failed to check succession", "error", err)
+		shouldProceed = true
+	}
+
+	if wasReplaced {
+		currentOwner, _ := marker.CurrentOwner()
+		slog.Info("we've been replaced, exiting gracefully",
+			"our_pod", podName,
+			"current_owner", currentOwner)
+
+		if history, err := marker.GetHistory(); err == nil && len(history) > 0 {
+			slog.Debug("succession history",
+				"entries", len(history),
+				"latest", history[0].Owner)
+		}
+
+		os.Exit(0)
+	}
+
+	if !shouldProceed {
+		slog.Error("succession check says we shouldn't proceed")
+		os.Exit(1)
+	}
+
+	var restartStart time.Time
 
 	client, err := appctl.DialBinary(binary)
 	switch {
 	case errors.Is(err, appctl.ErrNoPidFile):
 		slog.Info("no existing process found")
+
+		if err := marker.Claim(); err != nil {
+			slog.Warn("failed to claim succession", "error", err)
+		} else {
+			slog.Info("claimed succession", "pod", podName)
+		}
 	case err != nil:
 		slog.Error("failed to connect to process", "error", err)
 		os.Exit(1)
-	// TODO: handle case where pid exists but ctl files doesnt
+
 	default:
 		defer client.Close()
 
@@ -54,6 +98,19 @@ func main() {
 
 		version = strings.TrimSuffix(version, "\n")
 		slog.Info("stopping existing process", "version", version)
+
+		if err := marker.Claim(); err != nil {
+			slog.Warn("failed to claim succession", "error", err)
+		} else {
+			slog.Info("claimed succession", "pod", podName)
+
+			if history, err := marker.GetHistory(); err == nil && len(history) > 1 {
+				slog.Debug("succession history updated",
+					"new_owner", history[0].Owner,
+					"previous_owner", history[1].Owner,
+					"total_entries", len(history))
+			}
+		}
 
 		restartStart = time.Now()
 		err = client.CallWithContext(context.TODO(), "exit", []string{}, nil)
