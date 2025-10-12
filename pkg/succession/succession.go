@@ -4,255 +4,125 @@ package succession
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
-	"sync"
-	"time"
 
-	"github.com/gofrs/flock"
-	"github.com/google/renameio/v2"
-	"github.com/samber/lo"
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 // HistoryEntry represents one entry in the succession history
 type HistoryEntry struct {
-	Owner     string    `json:"owner"`
-	Timestamp time.Time `json:"timestamp"`
-}
-
-// HistoryData is the complete succession history
-type HistoryData struct {
-	History []HistoryEntry `json:"history"` // All owners (most recent first)
+	ID    uint   `gorm:"primarykey"`
+	Owner string `gorm:"index;not null"`
 }
 
 // Marker tracks succession using a history of all owners
 type Marker struct {
-	path        string
-	identity    string
-	maxHistory  int           // Maximum history entries to keep
-	lockTimeout time.Duration // How long to wait for file lock
-	mu          sync.Mutex    // Local mutex for this process
-}
-
-// Option configures a Marker
-type Option func(*Marker)
-
-// WithMaxHistory sets the maximum number of history entries to keep
-func WithMaxHistory(n int) Option {
-	return func(m *Marker) {
-		m.maxHistory = n
-	}
-}
-
-// WithLockTimeout sets how long to wait for file lock
-func WithLockTimeout(d time.Duration) Option {
-	return func(m *Marker) {
-		m.lockTimeout = d
-	}
+	db         *gorm.DB
+	identity   string
+	maxHistory int // Maximum history entries to keep
 }
 
 // New creates a new succession marker with history tracking
-func New(path, identity string, opts ...Option) *Marker {
-	m := &Marker{
-		path:        path,
-		identity:    identity,
-		maxHistory:  100,             // Keep last 100 entries by default
-		lockTimeout: 5 * time.Second, // Wait up to 5 seconds for lock
+func New(path, identity string) (*Marker, error) {
+	// Open SQLite database with GORM
+	db, err := gorm.Open(sqlite.Open(path+"?_busy_timeout=5000&_journal=WAL"), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent), // Disable logging
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	for _, opt := range opts {
-		opt(m)
+	if err := db.AutoMigrate(&HistoryEntry{}); err != nil {
+		return nil, fmt.Errorf("failed to migrate schema: %w", err)
 	}
 
-	return m
+	return &Marker{
+		db:         db,
+		identity:   identity,
+		maxHistory: 25, // Keep last 25 entries by default
+	}, nil
 }
 
-// CheckSuccession determines what action this pod should take
-// Returns: shouldProceed, isReplaced, error
-func (m *Marker) CheckSuccession() (bool, bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Use file locking to ensure atomic read
-	data, err := m.readWithLock()
+func (m *Marker) Close() error {
+	sqlDB, err := m.db.DB()
 	if err != nil {
-		if os.IsNotExist(err) {
-			// No history file, we're the first
-			return true, false, nil
-		}
+		return err
+	}
+
+	return sqlDB.Close()
+}
+
+// CheckSuccession determines if this pod should proceed
+// Returns: shouldProceed, isReplaced, error
+func (m *Marker) CheckSuccession(ctx context.Context) (bool, bool, error) {
+	// Get the current owner (most recent entry)
+	currentOwner, err := m.CurrentOwner(ctx)
+	if err != nil {
 		return false, false, err
 	}
 
-	// Check our position in the history
-	_, position, _ := lo.FindIndexOf(data.History, func(entry HistoryEntry) bool {
-		return entry.Owner == m.identity
-	})
-
-	switch position {
-	case -1:
-		// Not in history at all - we're a NEW pod in a rolling update
-		// We should take over
+	// We're the current owner (or first) - proceed
+	if currentOwner == "" || currentOwner == m.identity {
 		return true, false, nil
-
-	case 0:
-		// We're the current owner (top of the list)
-		// This might be a restart of the current pod or a re-run
-		return true, false, nil
-
-	default:
-		// We're in the history but not current
-		// We've been replaced by a newer pod
-		return false, true, nil
 	}
+
+	// Someone else is current owner
+	// Check if we ever owned before (to determine if replaced)
+	var wasOwner bool
+	err = m.db.WithContext(ctx).
+		Model(&HistoryEntry{}).
+		Select("COUNT(*) > 0").
+		Where("owner = ?", m.identity).
+		Find(&wasOwner).Error
+
+	if err != nil {
+		return false, false, fmt.Errorf("failed to check history: %w", err)
+	}
+
+	// If we're not current AND we were an owner before = we got replaced
+	// If we're not current AND we were never an owner = we're new and taking over
+	// In both cases: new pods proceed, replaced pods don't
+	return !wasOwner, wasOwner, nil
 }
 
 // Claim adds this pod to the top of the succession history
-func (m *Marker) Claim() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	fileLock := flock.New(m.path)
-
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), m.lockTimeout)
-	defer cancel()
-
-	// Try to acquire exclusive lock
-	locked, err := fileLock.TryLockContext(ctx, 10*time.Millisecond)
-	if err != nil {
-		return fmt.Errorf("failed to acquire write lock: %w", err)
-	}
-	if !locked {
-		return fmt.Errorf("timeout acquiring write lock")
-	}
-	defer fileLock.Unlock()
-
-	// Open or create file
-	file, err := os.OpenFile(m.path, os.O_RDWR|os.O_CREATE, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open history file: %w", err)
-	}
-	defer file.Close()
-
-	// Load existing data or create new
-	var data HistoryData
-	stat, err := file.Stat()
-	if err == nil && stat.Size() > 0 {
-		decoder := json.NewDecoder(file)
-		if err := decoder.Decode(&data); err != nil {
-			// File exists but is corrupted, start fresh
-			data = HistoryData{History: make([]HistoryEntry, 0)}
+func (m *Marker) Claim(ctx context.Context) error {
+	return m.db.Transaction(func(tx *gorm.DB) error {
+		if err := gorm.G[HistoryEntry](tx).Create(ctx, &HistoryEntry{Owner: m.identity}); err != nil {
+			return fmt.Errorf("failed to insert new entry: %w", err)
 		}
-	} else {
-		// New file
-		data = HistoryData{History: make([]HistoryEntry, 0)}
-	}
 
-	// Create new entry
-	newEntry := HistoryEntry{
-		Owner:     m.identity,
-		Timestamp: time.Now(),
-	}
-
-	// If we're already at the top, just update timestamp
-	if len(data.History) > 0 && data.History[0].Owner == m.identity {
-		data.History[0].Timestamp = newEntry.Timestamp
-	} else {
-		// Filter out any existing entries for us and prepend new entry
-		filteredHistory := lo.Filter(data.History, func(entry HistoryEntry, _ int) bool {
-			return entry.Owner != m.identity
-		})
-
-		// Prepend new entry and trim to max history
-		data.History = lo.Slice(append([]HistoryEntry{newEntry}, filteredHistory...), 0, m.maxHistory)
-	}
-
-	// Write back atomically using renameio
-	t, err := renameio.TempFile("", m.path)
-	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
-	}
-	defer t.Cleanup()
-
-	encoder := json.NewEncoder(t)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(&data); err != nil {
-		return fmt.Errorf("failed to write history: %w", err)
-	}
-
-	if err := t.CloseAtomicallyReplace(); err != nil {
-		return fmt.Errorf("failed to update history file: %w", err)
-	}
-
-	return nil
-}
-
-// CurrentOwner returns the current owner (top of the history)
-func (m *Marker) CurrentOwner() (string, error) {
-	data, err := m.readWithLock()
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
+		count, err := gorm.G[HistoryEntry](tx).Count(ctx, "id")
+		if err != nil {
+			return fmt.Errorf("failed to count entries: %w", err)
 		}
-		return "", err
-	}
 
-	if len(data.History) > 0 {
-		return data.History[0].Owner, nil
-	}
-	return "", nil
-}
+		if count > int64(m.maxHistory) {
+			subquery := tx.Model(&HistoryEntry{}).Select("id").Order("id DESC").Limit(m.maxHistory)
 
-// GetHistory returns the full succession history
-func (m *Marker) GetHistory() ([]HistoryEntry, error) {
-	data, err := m.readWithLock()
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
+			if _, err := gorm.G[HistoryEntry](tx).Where("id NOT IN (?)", subquery).Delete(ctx); err != nil {
+				return fmt.Errorf("failed to trim old entries: %w", err)
+			}
 		}
-		return nil, err
-	}
 
-	return data.History, nil
+		return nil
+	})
 }
 
-// readWithLock reads the history file with a shared lock
-func (m *Marker) readWithLock() (*HistoryData, error) {
-	fileLock := flock.New(m.path)
-
-	// Create context with timeout
-	ctx, cancel := context.WithTimeout(context.Background(), m.lockTimeout)
-	defer cancel()
-
-	// Try to acquire shared lock
-	locked, err := fileLock.TryRLockContext(ctx, 10*time.Millisecond)
-	if err != nil {
-		return nil, fmt.Errorf("failed to acquire read lock: %w", err)
-	}
-	if !locked {
-		return nil, fmt.Errorf("timeout acquiring read lock")
-	}
-	defer fileLock.Unlock()
-
-	// Read the file
-	file, err := os.Open(m.path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	var data HistoryData
-	decoder := json.NewDecoder(file)
-	if err := decoder.Decode(&data); err != nil {
-		return nil, fmt.Errorf("failed to parse history: %w", err)
+func (m *Marker) CurrentOwner(ctx context.Context) (string, error) {
+	entry, err := gorm.G[HistoryEntry](m.db).Order("id DESC").First(ctx)
+	switch {
+	case err == gorm.ErrRecordNotFound:
+		return "", nil
+	case err != nil:
+		return "", fmt.Errorf("failed to get current owner: %w", err)
 	}
 
-	return &data, nil
+	return entry.Owner, nil
 }
 
-
-// String implements fmt.Stringer
-func (m *Marker) String() string {
-	return fmt.Sprintf("Marker{path=%s, identity=%s}", m.path, m.identity)
+func (m *Marker) GetHistory(ctx context.Context) ([]HistoryEntry, error) {
+	return gorm.G[HistoryEntry](m.db).Order("id DESC").Find(ctx)
 }

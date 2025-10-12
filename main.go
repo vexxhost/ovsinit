@@ -38,25 +38,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	marker := succession.New(
-		filepath.Join("/run/openvswitch", fmt.Sprintf(".%s.succession", binary)),
+	marker, err := succession.New(
+		filepath.Join("/run/openvswitch", fmt.Sprintf(".%s.succession.db", binary)),
 		podName,
-		succession.WithMaxHistory(25),
 	)
+	if err != nil {
+		slog.Error("failed to create succession marker", "error", err)
+		os.Exit(1)
+	}
+	defer marker.Close()
 
-	shouldProceed, wasReplaced, err := marker.CheckSuccession()
+	shouldProceed, wasReplaced, err := marker.CheckSuccession(context.TODO())
 	if err != nil {
 		slog.Warn("failed to check succession", "error", err)
 		shouldProceed = true
 	}
 
 	if wasReplaced {
-		currentOwner, _ := marker.CurrentOwner()
+		currentOwner, _ := marker.CurrentOwner(context.TODO())
 		slog.Info("we've been replaced, exiting gracefully",
 			"our_pod", podName,
 			"current_owner", currentOwner)
 
-		if history, err := marker.GetHistory(); err == nil && len(history) > 0 {
+		if history, err := marker.GetHistory(context.TODO()); err == nil && len(history) > 0 {
 			slog.Debug("succession history",
 				"entries", len(history),
 				"latest", history[0].Owner)
@@ -77,7 +81,7 @@ func main() {
 	case errors.Is(err, appctl.ErrNoPidFile):
 		slog.Info("no existing process found")
 
-		if err := marker.Claim(); err != nil {
+		if err := marker.Claim(context.TODO()); err != nil {
 			slog.Warn("failed to claim succession", "error", err)
 		} else {
 			slog.Info("claimed succession", "pod", podName)
@@ -99,12 +103,12 @@ func main() {
 		version = strings.TrimSuffix(version, "\n")
 		slog.Info("stopping existing process", "version", version)
 
-		if err := marker.Claim(); err != nil {
+		if err := marker.Claim(context.TODO()); err != nil {
 			slog.Warn("failed to claim succession", "error", err)
 		} else {
 			slog.Info("claimed succession", "pod", podName)
 
-			if history, err := marker.GetHistory(); err == nil && len(history) > 1 {
+			if history, err := marker.GetHistory(context.TODO()); err == nil && len(history) > 1 {
 				slog.Debug("succession history updated",
 					"new_owner", history[0].Owner,
 					"previous_owner", history[1].Owner,
