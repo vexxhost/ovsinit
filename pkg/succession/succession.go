@@ -21,6 +21,25 @@ type HistoryEntry struct {
 	Owner string `gorm:"index;not null"`
 }
 
+func (h *HistoryEntry) AfterCreate(tx *gorm.DB) (err error) {
+	ctx := tx.Statement.Context
+
+	count, err := gorm.G[HistoryEntry](tx).Count(ctx, "id")
+	if err != nil {
+		return fmt.Errorf("failed to count entries: %w", err)
+	}
+
+	if count > MAX_HISTORY {
+		subquery := tx.Model(&HistoryEntry{}).Select("id").Order("id DESC").Limit(MAX_HISTORY)
+
+		if _, err := gorm.G[HistoryEntry](tx).Where("id NOT IN (?)", subquery).Delete(ctx); err != nil {
+			return fmt.Errorf("failed to trim old entries: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // Marker tracks succession using a history of all owners
 type Marker struct {
 	db       *gorm.DB
@@ -89,28 +108,8 @@ func (m *Marker) CheckSuccession(ctx context.Context) (bool, bool, error) {
 	return !wasOwner, wasOwner, nil
 }
 
-// Claim adds this pod to the top of the succession history
 func (m *Marker) Claim(ctx context.Context) error {
-	return m.db.Transaction(func(tx *gorm.DB) error {
-		if err := gorm.G[HistoryEntry](tx).Create(ctx, &HistoryEntry{Owner: m.identity}); err != nil {
-			return fmt.Errorf("failed to insert new entry: %w", err)
-		}
-
-		count, err := gorm.G[HistoryEntry](tx).Count(ctx, "id")
-		if err != nil {
-			return fmt.Errorf("failed to count entries: %w", err)
-		}
-
-		if count > MAX_HISTORY {
-			subquery := tx.Model(&HistoryEntry{}).Select("id").Order("id DESC").Limit(MAX_HISTORY)
-
-			if _, err := gorm.G[HistoryEntry](tx).Where("id NOT IN (?)", subquery).Delete(ctx); err != nil {
-				return fmt.Errorf("failed to trim old entries: %w", err)
-			}
-		}
-
-		return nil
-	})
+	return gorm.G[HistoryEntry](m.db).Create(ctx, &HistoryEntry{Owner: m.identity})
 }
 
 func (m *Marker) CurrentOwner(ctx context.Context) (string, error) {
