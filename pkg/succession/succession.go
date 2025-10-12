@@ -23,8 +23,7 @@ type HistoryEntry struct {
 
 // HistoryData is the complete succession history
 type HistoryData struct {
-	Current HistoryEntry   `json:"current"` // Most recent owner
-	History []HistoryEntry `json:"history"` // All previous owners (including current)
+	History []HistoryEntry `json:"history"` // All owners (most recent first)
 }
 
 // Marker tracks succession using a history of all owners
@@ -159,11 +158,7 @@ func (m *Marker) Claim() error {
 	// If we're already at the top, just update timestamp
 	if len(data.History) > 0 && data.History[0].Owner == m.identity {
 		data.History[0].Timestamp = newEntry.Timestamp
-		data.Current = newEntry
 	} else {
-		// Add ourselves to the top of the history
-		data.Current = newEntry
-
 		// Filter out any existing entries for us and prepend new entry
 		filteredHistory := lo.Filter(data.History, func(entry HistoryEntry, _ int) bool {
 			return entry.Owner != m.identity
@@ -203,7 +198,10 @@ func (m *Marker) CurrentOwner() (string, error) {
 		return "", err
 	}
 
-	return data.Current.Owner, nil
+	if len(data.History) > 0 {
+		return data.History[0].Owner, nil
+	}
+	return "", nil
 }
 
 // GetHistory returns the full succession history
