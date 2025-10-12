@@ -114,71 +114,85 @@ func (m *Marker) Claim() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	return m.withLock(true, func() error {
-		// Open or create file
-		file, err := os.OpenFile(m.path, os.O_RDWR|os.O_CREATE, 0644)
-		if err != nil {
-			return fmt.Errorf("failed to open history file: %w", err)
-		}
-		defer file.Close()
+	fileLock := flock.New(m.path)
 
-		// Load existing data or create new
-		var data HistoryData
-		stat, err := file.Stat()
-		if err == nil && stat.Size() > 0 {
-			decoder := json.NewDecoder(file)
-			if err := decoder.Decode(&data); err != nil {
-				// File exists but is corrupted, start fresh
-				data = HistoryData{History: make([]HistoryEntry, 0)}
-			}
-		} else {
-			// New file
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), m.lockTimeout)
+	defer cancel()
+
+	// Try to acquire exclusive lock
+	locked, err := fileLock.TryLockContext(ctx, 10*time.Millisecond)
+	if err != nil {
+		return fmt.Errorf("failed to acquire write lock: %w", err)
+	}
+	if !locked {
+		return fmt.Errorf("timeout acquiring write lock")
+	}
+	defer fileLock.Unlock()
+
+	// Open or create file
+	file, err := os.OpenFile(m.path, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open history file: %w", err)
+	}
+	defer file.Close()
+
+	// Load existing data or create new
+	var data HistoryData
+	stat, err := file.Stat()
+	if err == nil && stat.Size() > 0 {
+		decoder := json.NewDecoder(file)
+		if err := decoder.Decode(&data); err != nil {
+			// File exists but is corrupted, start fresh
 			data = HistoryData{History: make([]HistoryEntry, 0)}
 		}
+	} else {
+		// New file
+		data = HistoryData{History: make([]HistoryEntry, 0)}
+	}
 
-		// Create new entry
-		newEntry := HistoryEntry{
-			Owner:     m.identity,
-			Timestamp: time.Now(),
-		}
+	// Create new entry
+	newEntry := HistoryEntry{
+		Owner:     m.identity,
+		Timestamp: time.Now(),
+	}
 
-		// If we're already at the top, just update timestamp
-		if len(data.History) > 0 && data.History[0].Owner == m.identity {
-			data.History[0].Timestamp = newEntry.Timestamp
-			data.Current = newEntry
-		} else {
-			// Add ourselves to the top of the history
-			data.Current = newEntry
+	// If we're already at the top, just update timestamp
+	if len(data.History) > 0 && data.History[0].Owner == m.identity {
+		data.History[0].Timestamp = newEntry.Timestamp
+		data.Current = newEntry
+	} else {
+		// Add ourselves to the top of the history
+		data.Current = newEntry
 
-			// Filter out any existing entries for us and prepend new entry
-			filteredHistory := lo.Filter(data.History, func(entry HistoryEntry, _ int) bool {
-				return entry.Owner != m.identity
-			})
+		// Filter out any existing entries for us and prepend new entry
+		filteredHistory := lo.Filter(data.History, func(entry HistoryEntry, _ int) bool {
+			return entry.Owner != m.identity
+		})
 
-			// Prepend new entry and trim to max history
-			data.History = lo.Slice(append([]HistoryEntry{newEntry}, filteredHistory...), 0, m.maxHistory)
-		}
-		data.Version++
+		// Prepend new entry and trim to max history
+		data.History = lo.Slice(append([]HistoryEntry{newEntry}, filteredHistory...), 0, m.maxHistory)
+	}
+	data.Version++
 
-		// Write back atomically using renameio
-		t, err := renameio.TempFile("", m.path)
-		if err != nil {
-			return fmt.Errorf("failed to create temp file: %w", err)
-		}
-		defer t.Cleanup()
+	// Write back atomically using renameio
+	t, err := renameio.TempFile("", m.path)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	defer t.Cleanup()
 
-		encoder := json.NewEncoder(t)
-		encoder.SetIndent("", "  ")
-		if err := encoder.Encode(&data); err != nil {
-			return fmt.Errorf("failed to write history: %w", err)
-		}
+	encoder := json.NewEncoder(t)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(&data); err != nil {
+		return fmt.Errorf("failed to write history: %w", err)
+	}
 
-		if err := t.CloseAtomicallyReplace(); err != nil {
-			return fmt.Errorf("failed to update history file: %w", err)
-		}
+	if err := t.CloseAtomicallyReplace(); err != nil {
+		return fmt.Errorf("failed to update history file: %w", err)
+	}
 
-		return nil
-	})
+	return nil
 }
 
 // CurrentOwner returns the current owner (top of the history)
@@ -207,54 +221,38 @@ func (m *Marker) GetHistory() ([]HistoryEntry, error) {
 	return data.History, nil
 }
 
-// withLock executes a function while holding a file lock
-func (m *Marker) withLock(exclusive bool, fn func() error) error {
+// readWithLock reads the history file with a shared lock
+func (m *Marker) readWithLock() (*HistoryData, error) {
 	fileLock := flock.New(m.path)
 
 	// Create context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), m.lockTimeout)
 	defer cancel()
 
-	// Try to acquire lock
-	var locked bool
-	var err error
-	if exclusive {
-		locked, err = fileLock.TryLockContext(ctx, 10*time.Millisecond)
-	} else {
-		locked, err = fileLock.TryRLockContext(ctx, 10*time.Millisecond)
-	}
-
+	// Try to acquire shared lock
+	locked, err := fileLock.TryRLockContext(ctx, 10*time.Millisecond)
 	if err != nil {
-		return fmt.Errorf("failed to acquire lock: %w", err)
+		return nil, fmt.Errorf("failed to acquire read lock: %w", err)
 	}
 	if !locked {
-		return fmt.Errorf("timeout acquiring lock")
+		return nil, fmt.Errorf("timeout acquiring read lock")
 	}
 	defer fileLock.Unlock()
 
-	return fn()
-}
+	// Read the file
+	file, err := os.Open(m.path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
 
-// readWithLock reads the history file with a shared lock
-func (m *Marker) readWithLock() (*HistoryData, error) {
-	var data *HistoryData
-	err := m.withLock(false, func() error {
-		file, err := os.Open(m.path)
-		if err != nil {
-			return err
-		}
-		defer file.Close()
+	var data HistoryData
+	decoder := json.NewDecoder(file)
+	if err := decoder.Decode(&data); err != nil {
+		return nil, fmt.Errorf("failed to parse history: %w", err)
+	}
 
-		var histData HistoryData
-		decoder := json.NewDecoder(file)
-		if err := decoder.Decode(&histData); err != nil {
-			return fmt.Errorf("failed to parse history: %w", err)
-		}
-
-		data = &histData
-		return nil
-	})
-	return data, err
+	return &data, nil
 }
 
 
