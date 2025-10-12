@@ -25,7 +25,6 @@ type HistoryEntry struct {
 type HistoryData struct {
 	Current HistoryEntry   `json:"current"` // Most recent owner
 	History []HistoryEntry `json:"history"` // All previous owners (including current)
-	Version int            `json:"version"` // For detecting concurrent updates
 }
 
 // Marker tracks succession using a history of all owners
@@ -173,7 +172,6 @@ func (m *Marker) Claim() error {
 		// Prepend new entry and trim to max history
 		data.History = lo.Slice(append([]HistoryEntry{newEntry}, filteredHistory...), 0, m.maxHistory)
 	}
-	data.Version++
 
 	// Write back atomically using renameio
 	t, err := renameio.TempFile("", m.path)
