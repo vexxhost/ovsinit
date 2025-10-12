@@ -11,6 +11,10 @@ import (
 	"gorm.io/gorm/logger"
 )
 
+const (
+	MAX_HISTORY = 25
+)
+
 // HistoryEntry represents one entry in the succession history
 type HistoryEntry struct {
 	ID    uint   `gorm:"primarykey"`
@@ -19,9 +23,8 @@ type HistoryEntry struct {
 
 // Marker tracks succession using a history of all owners
 type Marker struct {
-	db         *gorm.DB
-	identity   string
-	maxHistory int // Maximum history entries to keep
+	db       *gorm.DB
+	identity string
 }
 
 // New creates a new succession marker with history tracking
@@ -39,9 +42,8 @@ func New(path, identity string) (*Marker, error) {
 	}
 
 	return &Marker{
-		db:         db,
-		identity:   identity,
-		maxHistory: 25, // Keep last 25 entries by default
+		db:       db,
+		identity: identity,
 	}, nil
 }
 
@@ -99,8 +101,8 @@ func (m *Marker) Claim(ctx context.Context) error {
 			return fmt.Errorf("failed to count entries: %w", err)
 		}
 
-		if count > int64(m.maxHistory) {
-			subquery := tx.Model(&HistoryEntry{}).Select("id").Order("id DESC").Limit(m.maxHistory)
+		if count > MAX_HISTORY {
+			subquery := tx.Model(&HistoryEntry{}).Select("id").Order("id DESC").Limit(MAX_HISTORY)
 
 			if _, err := gorm.G[HistoryEntry](tx).Where("id NOT IN (?)", subquery).Delete(ctx); err != nil {
 				return fmt.Errorf("failed to trim old entries: %w", err)
