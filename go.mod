@@ -7,5 +7,7 @@ require (
 	github.com/cenkalti/rpc2 v1.0.4 // indirect
 	github.com/gofrs/flock v0.13.0 // indirect
 	github.com/google/renameio/v2 v2.0.0 // indirect
+	github.com/samber/lo v1.52.0 // indirect
 	golang.org/x/sys v0.37.0 // indirect
+	golang.org/x/text v0.22.0 // indirect
 )

@@ -12,6 +12,7 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/google/renameio/v2"
+	"github.com/samber/lo"
 )
 
 // HistoryEntry represents one entry in the succession history
@@ -86,13 +87,9 @@ func (m *Marker) CheckSuccession() (bool, bool, error) {
 	}
 
 	// Check our position in the history
-	position := -1
-	for i, entry := range data.History {
-		if entry.Owner == m.identity {
-			position = i
-			break
-		}
-	}
+	_, position, _ := lo.FindIndexOf(data.History, func(entry HistoryEntry) bool {
+		return entry.Owner == m.identity
+	})
 
 	switch position {
 	case -1:
@@ -153,24 +150,13 @@ func (m *Marker) Claim() error {
 			// Add ourselves to the top of the history
 			data.Current = newEntry
 
-			// Prepend to history (most recent first)
-			newHistory := make([]HistoryEntry, 0, len(data.History)+1)
-			newHistory = append(newHistory, newEntry)
+			// Filter out any existing entries for us and prepend new entry
+			filteredHistory := lo.Filter(data.History, func(entry HistoryEntry, _ int) bool {
+				return entry.Owner != m.identity
+			})
 
-			// Add existing history, but skip any existing entries for us
-			// (in case we're reclaiming after being in the middle)
-			for _, entry := range data.History {
-				if entry.Owner != m.identity {
-					newHistory = append(newHistory, entry)
-				}
-			}
-
-			// Trim history if it's too long
-			if len(newHistory) > m.maxHistory {
-				newHistory = newHistory[:m.maxHistory]
-			}
-
-			data.History = newHistory
+			// Prepend new entry and trim to max history
+			data.History = lo.Slice(append([]HistoryEntry{newEntry}, filteredHistory...), 0, m.maxHistory)
 		}
 		data.Version++
 
