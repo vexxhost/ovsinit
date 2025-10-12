@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+	"github.com/google/renameio/v2"
 )
 
 // HistoryEntry represents one entry in the succession history
@@ -173,29 +174,20 @@ func (m *Marker) Claim() error {
 		}
 		data.Version++
 
-		// Write back atomically using temp file
-		tmpPath := m.path + ".tmp"
-		tmpFile, err := os.Create(tmpPath)
+		// Write back atomically using renameio
+		t, err := renameio.TempFile("", m.path)
 		if err != nil {
 			return fmt.Errorf("failed to create temp file: %w", err)
 		}
+		defer t.Cleanup()
 
-		encoder := json.NewEncoder(tmpFile)
+		encoder := json.NewEncoder(t)
 		encoder.SetIndent("", "  ")
 		if err := encoder.Encode(&data); err != nil {
-			tmpFile.Close()
-			os.Remove(tmpPath)
 			return fmt.Errorf("failed to write history: %w", err)
 		}
 
-		if err := tmpFile.Close(); err != nil {
-			os.Remove(tmpPath)
-			return fmt.Errorf("failed to close temp file: %w", err)
-		}
-
-		// Atomic rename
-		if err := os.Rename(tmpPath, m.path); err != nil {
-			os.Remove(tmpPath)
+		if err := t.CloseAtomicallyReplace(); err != nil {
 			return fmt.Errorf("failed to update history file: %w", err)
 		}
 
