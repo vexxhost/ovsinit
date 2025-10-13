@@ -7,8 +7,8 @@ import (
 	"fmt"
 
 	"github.com/glebarez/sqlite"
+	slogGorm "github.com/orandin/slog-gorm"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 )
 
 const (
@@ -48,9 +48,11 @@ type Marker struct {
 
 // New creates a new succession marker with history tracking
 func New(path, identity string) (*Marker, error) {
+	gormLogger := slogGorm.New()
+
 	// Open SQLite database with GORM
 	db, err := gorm.Open(sqlite.Open(path+"?_busy_timeout=5000&_journal=WAL"), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent), // Disable logging
+		Logger: gormLogger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
@@ -75,6 +77,15 @@ func (m *Marker) Close() error {
 	return sqlDB.Close()
 }
 
+func (m *Marker) WasOwner(ctx context.Context) (bool, error) {
+	count, err := gorm.G[HistoryEntry](m.db).Where("owner = ?", m.identity).Count(ctx, "id")
+	if err != nil {
+		return false, fmt.Errorf("failed to check ownership history: %w", err)
+	}
+
+	return count > 0, nil
+}
+
 // CheckSuccession determines if this pod should proceed
 // Returns: shouldProceed, isReplaced, error
 func (m *Marker) CheckSuccession(ctx context.Context) (bool, bool, error) {
@@ -91,15 +102,9 @@ func (m *Marker) CheckSuccession(ctx context.Context) (bool, bool, error) {
 
 	// Someone else is current owner
 	// Check if we ever owned before (to determine if replaced)
-	var wasOwner bool
-	err = m.db.WithContext(ctx).
-		Model(&HistoryEntry{}).
-		Select("COUNT(*) > 0").
-		Where("owner = ?", m.identity).
-		Find(&wasOwner).Error
-
+	wasOwner, err := m.WasOwner(ctx)
 	if err != nil {
-		return false, false, fmt.Errorf("failed to check history: %w", err)
+		return false, false, err
 	}
 
 	// If we're not current AND we were an owner before = we got replaced
