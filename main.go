@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -15,6 +16,50 @@ import (
 	"github.com/vexxhost/ovsinit/pkg/appctl"
 	"github.com/vexxhost/ovsinit/pkg/succession" // Uses the history.go version
 )
+
+var (
+	ovsDB     = flag.String("ovs-db", "", "Path to OVS database file")
+	ovsSchema = flag.String("ovs-schema", "", "Path to OVS schema file")
+)
+
+func initializeOVSDatabase(dbPath, schemaPath string) error {
+	dbDir := filepath.Dir(dbPath)
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		return fmt.Errorf("failed to create database directory: %w", err)
+	}
+
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		cmd := exec.Command("ovsdb-tool", "create", dbPath)
+		if schemaPath != "" {
+			cmd = exec.Command("ovsdb-tool", "create", dbPath, schemaPath)
+		}
+
+		if output, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("failed to create database: %w, output: %s", err, output)
+		}
+
+		slog.Info("created OVS database", "path", dbPath)
+	}
+
+	if schemaPath != "" {
+		cmd := exec.Command("ovsdb-tool", "needs-conversion", dbPath, schemaPath)
+		output, err := cmd.Output()
+		if err != nil {
+			return fmt.Errorf("failed to check if database needs conversion: %w", err)
+		}
+
+		if strings.TrimSpace(string(output)) == "yes" {
+			cmd := exec.Command("ovsdb-tool", "convert", dbPath, schemaPath)
+			if output, err := cmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("failed to convert database: %w, output: %s", err, output)
+			}
+
+			slog.Info("converted OVS database", "path", dbPath, "schema", schemaPath)
+		}
+	}
+
+	return nil
+}
 
 func main() {
 	flag.Parse()
@@ -31,6 +76,13 @@ func main() {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil)).With("binary", binary)
 	slog.SetDefault(logger)
+
+	if *ovsDB != "" {
+		if err := initializeOVSDatabase(*ovsDB, *ovsSchema); err != nil {
+			slog.Error("failed to initialize OVS database", "error", err)
+			os.Exit(1)
+		}
+	}
 
 	podName := os.Getenv("POD_NAME")
 	if podName == "" {
