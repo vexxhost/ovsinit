@@ -25,7 +25,11 @@ func TestNoExistingDB(t *testing.T) {
 	dir := t.TempDir()
 
 	pod1 := createMarker(t, dir, "pod-1")
-	defer pod1.Close()
+	defer func() {
+		if err := pod1.Close(); err != nil {
+			t.Errorf("failed to close pod1: %v", err)
+		}
+	}()
 
 	shouldProceed, isReplaced, err := pod1.CheckSuccession(ctx)
 	require.NoError(t, err)
@@ -45,14 +49,24 @@ func TestNoExistingPod(t *testing.T) {
 	dir := t.TempDir()
 
 	pod1 := createMarker(t, dir, "pod-1")
-	defer pod1.Close()
+	defer func() {
+		if err := pod1.Close(); err != nil {
+			t.Errorf("failed to close pod1: %v", err)
+		}
+	}()
 
 	err := pod1.Claim(ctx)
 	require.NoError(t, err)
-	pod1.Close()
+	if err := pod1.Close(); err != nil {
+		t.Errorf("failed to close pod1: %v", err)
+	}
 
 	pod2 := createMarker(t, dir, "pod-2")
-	defer pod2.Close()
+	defer func() {
+		if err := pod2.Close(); err != nil {
+			t.Errorf("failed to close pod2: %v", err)
+		}
+	}()
 
 	shouldProceed, isReplaced, err := pod2.CheckSuccession(ctx)
 	require.NoError(t, err)
@@ -72,7 +86,11 @@ func TestExistingPodWithNewOneStarting(t *testing.T) {
 	dir := t.TempDir()
 
 	pod1 := createMarker(t, dir, "pod-1")
-	defer pod1.Close()
+	defer func() {
+		if err := pod1.Close(); err != nil {
+			t.Errorf("failed to close pod1: %v", err)
+		}
+	}()
 
 	err := pod1.Claim(ctx)
 	require.NoError(t, err)
@@ -83,7 +101,11 @@ func TestExistingPodWithNewOneStarting(t *testing.T) {
 	assert.False(t, isReplaced)
 
 	pod2 := createMarker(t, dir, "pod-2")
-	defer pod2.Close()
+	defer func() {
+		if err := pod2.Close(); err != nil {
+			t.Errorf("failed to close pod2: %v", err)
+		}
+	}()
 
 	shouldProceed, isReplaced, err = pod2.CheckSuccession(ctx)
 	require.NoError(t, err)
@@ -104,14 +126,24 @@ func TestExistingPodRestart(t *testing.T) {
 	dir := t.TempDir()
 
 	pod1 := createMarker(t, dir, "pod-1")
-	defer pod1.Close()
+	defer func() {
+		if err := pod1.Close(); err != nil {
+			t.Errorf("failed to close pod1: %v", err)
+		}
+	}()
 
 	err := pod1.Claim(ctx)
 	require.NoError(t, err)
-	pod1.Close()
+	if err := pod1.Close(); err != nil {
+		t.Errorf("failed to close pod1: %v", err)
+	}
 
 	pod1 = createMarker(t, dir, "pod-1")
-	defer pod1.Close()
+	defer func() {
+		if err := pod1.Close(); err != nil {
+			t.Errorf("failed to close pod1: %v", err)
+		}
+	}()
 
 	shouldProceed, isReplaced, err := pod1.CheckSuccession(ctx)
 	require.NoError(t, err)
@@ -137,7 +169,11 @@ func TestRotationWithLimit(t *testing.T) {
 	dir := t.TempDir()
 
 	pod0 := createMarker(t, dir, "pod-0")
-	defer pod0.Close()
+	defer func() {
+		if err := pod0.Close(); err != nil {
+			t.Errorf("failed to close pod0: %v", err)
+		}
+	}()
 
 	totalEntries := MAX_HISTORY + 5
 	for i := 0; i < totalEntries; i++ {
@@ -146,11 +182,17 @@ func TestRotationWithLimit(t *testing.T) {
 		err := pod.Claim(ctx)
 		require.NoError(t, err)
 
-		pod.Close()
+		if err := pod.Close(); err != nil {
+			t.Errorf("failed to close pod: %v", err)
+		}
 	}
 
 	pod := createMarker(t, dir, "pod-final")
-	defer pod.Close()
+	defer func() {
+		if err := pod.Close(); err != nil {
+			t.Errorf("failed to close pod: %v", err)
+		}
+	}()
 
 	history, err := pod.GetHistory(ctx)
 	require.NoError(t, err)
@@ -176,7 +218,11 @@ func TestMultiplePodRotations(t *testing.T) {
 	pods := []string{"pod-a", "pod-b", "pod-c", "pod-a", "pod-b"}
 	for i, podName := range pods {
 		marker := createMarker(t, dir, podName)
-		defer marker.Close()
+		defer func() {
+			if err := marker.Close(); err != nil {
+				t.Errorf("failed to close marker: %v", err)
+			}
+		}()
 
 		shouldProceed, isReplaced, err := marker.CheckSuccession(ctx)
 		require.NoError(t, err)
@@ -201,11 +247,17 @@ func TestMultiplePodRotations(t *testing.T) {
 			require.NoError(t, err)
 		}
 
-		marker.Close()
+		if err := marker.Close(); err != nil {
+			t.Errorf("failed to close marker: %v", err)
+		}
 	}
 
 	marker := createMarker(t, dir, "pod-final")
-	defer marker.Close()
+	defer func() {
+		if err := marker.Close(); err != nil {
+			t.Errorf("failed to close marker: %v", err)
+		}
+	}()
 
 	history, err := marker.GetHistory(ctx)
 	require.NoError(t, err)

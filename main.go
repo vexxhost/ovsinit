@@ -46,7 +46,11 @@ func main() {
 		slog.Error("failed to create succession marker", "error", err)
 		os.Exit(1)
 	}
-	defer marker.Close()
+	defer func() {
+		if err := marker.Close(); err != nil {
+			slog.Error("failed to close marker", "error", err)
+		}
+	}()
 
 	shouldProceed, wasReplaced, err := marker.CheckSuccession(context.TODO())
 	if err != nil {
@@ -91,7 +95,11 @@ func main() {
 		os.Exit(1)
 
 	default:
-		defer client.Close()
+		defer func() {
+			if err := client.Close(); err != nil {
+				slog.Error("failed to close client", "error", err)
+			}
+		}()
 
 		var version string
 		err = client.CallWithContext(context.TODO(), "version", []string{}, &version)
