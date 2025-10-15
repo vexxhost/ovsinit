@@ -6,7 +6,7 @@ require (
 	github.com/cenkalti/rpc2 v1.0.4
 	github.com/glebarez/sqlite v1.11.0
 	github.com/orandin/slog-gorm v1.4.0
-	github.com/stretchr/testify v1.9.0
+	github.com/stretchr/testify v1.11.1
 	gorm.io/gorm v1.31.0
 )
 
