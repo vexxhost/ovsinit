@@ -77,13 +77,6 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil)).With("binary", binary)
 	slog.SetDefault(logger)
 
-	if *ovsDB != "" {
-		if err := initializeOVSDatabase(*ovsDB, *ovsSchema); err != nil {
-			slog.Error("failed to initialize OVS database", "error", err)
-			os.Exit(1)
-		}
-	}
-
 	podName := os.Getenv("POD_NAME")
 	if podName == "" {
 		slog.Error("POD_NAME environment variable must be set for succession tracking")
@@ -184,6 +177,13 @@ func main() {
 		}
 
 		slog.Info("stopped existing process")
+	}
+
+	if *ovsDB != "" {
+		if err := initializeOVSDatabase(*ovsDB, *ovsSchema); err != nil {
+			slog.Error("failed to initialize OVS database", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	if !restartStart.IsZero() {
