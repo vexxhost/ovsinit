@@ -136,8 +136,18 @@ func main() {
 			slog.Info("claimed succession", "pod", podName)
 		}
 	case err != nil:
-		slog.Error("failed to connect to process", "error", err)
-		os.Exit(1)
+		slog.Error("failed to connect to process, assuming dead, cleaning up.", "error", err)
+		if err := appctl.Cleanup(binary); err != nil {
+			slog.Error("failed to clean up", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("cleaned up stale process files")
+
+		if err := marker.Claim(context.TODO()); err != nil {
+			slog.Warn("failed to claim succession", "error", err)
+		} else {
+			slog.Info("claimed succession", "pod", podName)
+		}
 
 	default:
 		defer func() {
@@ -170,7 +180,7 @@ func main() {
 		}
 
 		restartStart = time.Now()
-		err = client.CallWithContext(context.TODO(), "exit", []string{}, nil)
+		err = client.Exit(context.TODO(), binary)
 		if err != nil {
 			slog.Error("failed to stop existing process", "error", err)
 			os.Exit(1)
