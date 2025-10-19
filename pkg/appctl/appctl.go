@@ -14,6 +14,7 @@ import (
 	"github.com/cenkalti/rpc2"
 	"github.com/cenkalti/rpc2/jsonrpc"
 	"github.com/fsnotify/fsnotify"
+	"github.com/prometheus/procfs"
 )
 
 const (
@@ -92,6 +93,7 @@ func Cleanup(binary string) error {
 
 func (c *Client) Exit(ctx context.Context, binary string) error {
 	pidPath := fmt.Sprintf("%s/%s.pid", RUN_DIR, binary)
+	ctlPattern := fmt.Sprintf("%s/%s.*.ctl", RUN_DIR, binary)
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -110,15 +112,74 @@ func (c *Client) Exit(ctx context.Context, binary string) error {
 	}
 
 	timeout := time.After(30 * time.Second)
+
+	pidRemoved := false
+	ctlRemoved := false
+
 	for {
 		select {
 		case event, ok := <-watcher.Events:
 			if !ok {
 				return errors.New("watcher channel closed")
 			}
-			if event.Name == pidPath && event.Op&fsnotify.Remove == fsnotify.Remove {
-				slog.Info("process exited, pid file removed", "pid_file", pidPath)
-				return nil
+			if event.Op&fsnotify.Remove == fsnotify.Remove {
+				if event.Name == pidPath {
+					pidRemoved = true
+					slog.Info("pid file removed", "pid_file", pidPath)
+				} else if matched, _ := filepath.Match(ctlPattern, event.Name); matched {
+					ctlRemoved = true
+					slog.Info("ctl file removed", "ctl_file", event.Name)
+				}
+
+				if pidRemoved && ctlRemoved {
+					slog.Info("files removed, waiting for hugepages to be available")
+
+					// Get initial hugepages state
+					fs, err := procfs.NewDefaultFS()
+					if err != nil {
+						slog.Warn("cannot access procfs, skipping hugepages check", "error", err)
+						return nil
+					}
+
+					// Poll until hugepages are available
+					ticker := time.NewTicker(50 * time.Millisecond)
+					defer ticker.Stop()
+					hugepagesTimeout := time.After(5 * time.Second)
+
+					for {
+						select {
+						case <-ticker.C:
+							memInfo, err := fs.Meminfo()
+							if err != nil {
+								slog.Warn("cannot read meminfo, assuming process exited", "error", err)
+								return nil
+							}
+
+							// Check if there are free hugepages
+							if memInfo.HugePagesFree != nil && *memInfo.HugePagesFree > 0 {
+								slog.Info("hugepages available, process fully exited",
+									"hugepages_free", *memInfo.HugePagesFree)
+								return nil
+							}
+
+							// Also check if no hugepages are configured
+							if memInfo.HugePagesTotal != nil && *memInfo.HugePagesTotal == 0 {
+								slog.Info("no hugepages configured, process fully exited")
+								return nil
+							}
+
+							slog.Debug("waiting for hugepages to be freed",
+								"hugepages_total", memInfo.HugePagesTotal,
+								"hugepages_free", memInfo.HugePagesFree)
+
+						case <-hugepagesTimeout:
+							slog.Warn("timeout waiting for hugepages, proceeding anyway")
+							return nil
+						case <-ctx.Done():
+							return ctx.Err()
+						}
+					}
+				}
 			}
 		case err, ok := <-watcher.Errors:
 			if !ok {
@@ -126,7 +187,7 @@ func (c *Client) Exit(ctx context.Context, binary string) error {
 			}
 			return fmt.Errorf("watcher error: %w", err)
 		case <-timeout:
-			return fmt.Errorf("timeout waiting for process to exit, pid file: %s", pidPath)
+			return fmt.Errorf("timeout waiting for process to exit (pid_removed=%v, ctl_removed=%v)", pidRemoved, ctlRemoved)
 		case <-ctx.Done():
 			return ctx.Err()
 		}
