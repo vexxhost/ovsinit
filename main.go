@@ -14,7 +14,8 @@ import (
 	"time"
 
 	"github.com/vexxhost/ovsinit/pkg/appctl"
-	"github.com/vexxhost/ovsinit/pkg/succession" // Uses the history.go version
+	"github.com/vexxhost/ovsinit/pkg/succession"
+	"github.com/vexxhost/ovsinit/pkg/verifier"
 )
 
 var (
@@ -183,6 +184,24 @@ func main() {
 		err = client.Exit(context.TODO(), binary)
 		if err != nil {
 			slog.Error("failed to stop existing process", "error", err)
+			os.Exit(1)
+		}
+
+		verifiers := []verifier.Verifier{
+			verifier.FileRemoval(fmt.Sprintf("%s/%s.pid", appctl.RUN_DIR, binary)),
+			verifier.FileRemoval(fmt.Sprintf("%s/%s.*.ctl", appctl.RUN_DIR, binary)),
+		}
+
+		if binary == "ovs-vswitchd" {
+			verifiers = append(verifiers, verifier.HugePages())
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		err = verifier.Run(ctx, verifiers...)
+		if err != nil {
+			slog.Error("verification after exit failed", "error", err)
 			os.Exit(1)
 		}
 
