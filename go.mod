@@ -3,12 +3,13 @@ module github.com/vexxhost/ovsinit
 go 1.25.1
 
 require (
-	github.com/cenkalti/rpc2 v1.0.4
+	github.com/cenkalti/rpc2 v1.0.5
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/glebarez/sqlite v1.11.0
 	github.com/orandin/slog-gorm v1.4.0
 	github.com/prometheus/procfs v0.17.0
 	github.com/stretchr/testify v1.11.1
+	golang.org/x/sync v0.17.0
 	gorm.io/gorm v1.31.0
 )
 
@@ -23,7 +24,6 @@ require (
 	github.com/mattn/go-isatty v0.0.17 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	golang.org/x/sync v0.17.0 // indirect
 	golang.org/x/sys v0.33.0 // indirect
 	golang.org/x/text v0.20.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
